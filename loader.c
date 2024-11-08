@@ -18,6 +18,7 @@ int pages_allocated = 0; // Counter for allocated pages
 
 #define PAGE_SIZE 4096 // Page size of 4KB
 
+int internal_fragmentation=0;
 /*
  * Release memory and other cleanups
  */
@@ -42,8 +43,7 @@ void page_fault_handler(int sig, siginfo_t *si, void *unused) {
 
     // Find the segment corresponding to the fault address
     for(int i = 0; i < ehdr->e_phnum; i++) {
-        if(phdr[i].p_type == PT_LOAD &&
-           (char *)fault_addr >= (char *)phdr[i].p_vaddr &&
+        if((char *)fault_addr >= (char *)phdr[i].p_vaddr &&
            (char *)fault_addr < (char *)(phdr[i].p_vaddr + phdr[i].p_memsz)) {
 
             // Calculate the page-aligned address to mmap
@@ -59,17 +59,32 @@ void page_fault_handler(int sig, siginfo_t *si, void *unused) {
             }
 
             // Move file descriptor to segment offset
-            int offset = phdr[i].p_offset + ((uintptr_t)page_start - phdr[i].p_vaddr);
-            lseek(fd, offset, SEEK_SET);
-
-            // Read from the file into the mapped memory
-            int to_read = (phdr[i].p_filesz > PAGE_SIZE) ? PAGE_SIZE : phdr[i].p_filesz;
-            if(read(fd, mapped_mem, to_read) != to_read) {
-                perror("Segment load failed");
-                exit(1);
+           // Calculate the offset for the read operation
+           int offset = phdr[i].p_offset + ((uintptr_t)page_start - phdr[i].p_vaddr);
+           if (lseek(fd, offset, SEEK_SET) == (off_t)-1) {
+               perror("lseek failed");
+               exit(1);
             }
-            return;
-        }
+            void *end=(char *)(phdr[i].p_vaddr + phdr[i].p_memsz);
+            if (end - fault_addr < PAGE_SIZE) internal_fragmentation += PAGE_SIZE - (end - fault_addr);
+
+            // Calculate how many bytes to read
+           int offset_within_segment = (uintptr_t)page_start - phdr[i].p_vaddr;
+           int remaining_size = phdr[i].p_filesz - offset_within_segment; // Remaining bytes in segment
+           int to_read = (remaining_size > PAGE_SIZE) ? PAGE_SIZE : remaining_size;
+
+           // Read from the file into the mapped memory
+           ssize_t bytes_read = read(fd, mapped_mem, to_read);
+              if (bytes_read < 0) {
+                 perror("Segment load failed (read error)");
+                  exit(1);
+              } else if (bytes_read < to_read) {
+                   fprintf(stderr, "Segment load failed: Expected to read %d bytes but read %ld bytes.\n",
+                  to_read, (long)bytes_read);
+                  exit(1); 
+              }
+              return;
+           }
     }
 
     // If no segment matched the faulting address, terminate
@@ -124,5 +139,5 @@ void load_and_run_elf(char **exe) {
     // Report page fault stats
     printf("Total page faults: %d\n", page_faults);
     printf("Total pages allocated: %d\n", pages_allocated);
-    printf("Internal fragmentation (in KB): %d\n", (pages_allocated * PAGE_SIZE - phdr_size) / 1024);
+    printf("Internal fragmentation (in KB): %d\n", (internal_fragmentation) / 1024);
 }
